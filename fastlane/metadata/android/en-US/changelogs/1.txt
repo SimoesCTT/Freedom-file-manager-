@@ -1,0 +1,5 @@
+Initial release.
+* Browse internal and external storage
+* Open files with any installed app
+* Create folders
+* Material 3 UI

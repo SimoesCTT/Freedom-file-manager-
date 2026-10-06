@@ -1,0 +1,24 @@
+A free, ad-free, tracker-free file manager for Android.
+
+No ads. No analytics. No network permission. No limitations.
+
+Features:
+* Browse internal and external storage
+* Tap folders to enter, Back to go up
+* Open files with any installed app
+* Create new folders
+* Sorted view: folders first, then files, alphabetical
+* Light/Dark theme (follows system)
+* Material 3 design
+
+This app does NOT request the INTERNET permission. It cannot phone home, because it has no network capability at all.
+
+Planned features:
+* Rename, delete, copy, move
+* Search within a folder
+* Breadcrumb navigation
+* File details dialog
+* Real per-filetype icons
+* Grid view
+
+License: GPL-3.0-or-later
