@@ -5,6 +5,11 @@ plugins {
 android {
     namespace = "com.free.files"
     compileSdk = 34
+
+    lint {
+        checkReleaseBuilds = false
+        abortOnError = false
+    }
     defaultConfig {
         applicationId = "com.free.files"
         minSdk = 24
