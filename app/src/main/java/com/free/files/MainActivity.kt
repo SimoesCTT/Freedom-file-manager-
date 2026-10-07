@@ -2,12 +2,14 @@ package com.free.files
 
 import android.Manifest
 import android.app.AlertDialog
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.os.storage.StorageManager
 import android.provider.Settings
 import android.view.Menu
 import android.view.MenuItem
@@ -27,112 +29,133 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private lateinit var adapter: FileAdapter
     private var currentDir: File = File("/")
-    private val selection = linkedSetOf<FileItem>()
+    private var atRoot = true
+    private val sel = linkedSetOf<FileItem>()
     private var showHidden = false
-    private var clipboard: Pair<File, Boolean>? = null // (source, cut?)
+    private var clip: Pair<File, Boolean>? = null
 
     private val permLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { refresh() }
+    ) { if (atRoot) showRoots() else refresh() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
-
         setSupportActionBar(binding.toolbar)
-        supportActionBar?.setDisplayHomeAsUpEnabled(true)
         binding.toolbar.setNavigationOnClickListener { goUp() }
-
         adapter = FileAdapter(
             mutableListOf(),
             onClick = { item -> handleClick(item) },
-            onLongClick = { item -> toggleSelection(item) },
-            isSelected = { selection.contains(it) }
+            onLongClick = { item -> toggleSel(item) },
+            isSelected = { sel.contains(it) }
         )
         binding.recyclerView.layoutManager = LinearLayoutManager(this)
         binding.recyclerView.adapter = adapter
-        binding.fabNewFolder.setOnClickListener { promptNewFolder() }
-
+        binding.fabNewFolder.setOnClickListener { newFolder() }
         ensurePermissions()
-        currentDir = FileUtils.startDir()
-        refresh()
+        showRoots()
+    }
+
+    private fun showRoots() {
+        atRoot = true
+        val roots = mutableListOf<FileItem>()
+        val internal = Environment.getExternalStorageDirectory()
+        if (internal != null && internal.exists()) {
+            roots.add(FileItem(internal, "Internal storage", true, 0L, internal.lastModified()))
+        }
+        try {
+            val sm = getSystemService(Context.STORAGE_SERVICE) as StorageManager
+            for (v in sm.storageVolumes) {
+                val d = v.directory ?: continue
+                if (!d.exists() || d.absolutePath == internal?.absolutePath) continue
+                val desc = try { v.getDescription(this) } catch (_: Exception) { d.name }
+                val label = (if (v.isRemovable) "SD/USB: " else "") + desc + "\n" + d.absolutePath
+                roots.add(FileItem(d, label, true, 0L, d.lastModified()))
+            }
+        } catch (e: Exception) {
+            Toast.makeText(this, "Vol error: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+        adapter.update(roots)
+        binding.pathText.text = "Select storage"
+        binding.emptyText.visibility = if (roots.isEmpty()) View.VISIBLE else View.GONE
+        binding.fabNewFolder.visibility = View.GONE
+        sel.clear()
+        supportActionBar?.title = "FreeFiles"
+        supportActionBar?.setDisplayHomeAsUpEnabled(false)
+        invalidateOptionsMenu()
     }
 
     private fun ensurePermissions() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             if (!Environment.isExternalStorageManager()) {
                 try {
-                    startActivity(
-                        Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
-                            .setData(Uri.parse("package:$packageName"))
-                    )
+                    startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
+                        .setData(Uri.parse("package:$packageName")))
                 } catch (_: Exception) {
                     startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
                 }
             }
         } else {
-            val perms = mutableListOf<String>()
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE)
-                != PackageManager.PERMISSION_GRANTED)
-                perms.add(Manifest.permission.READ_EXTERNAL_STORAGE)
+            val p = mutableListOf<String>()
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED)
+                p.add(Manifest.permission.READ_EXTERNAL_STORAGE)
             if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P &&
-                ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE)
-                != PackageManager.PERMISSION_GRANTED)
-                perms.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
-            if (perms.isNotEmpty()) permLauncher.launch(perms.toTypedArray())
+                ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED)
+                p.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            if (p.isNotEmpty()) permLauncher.launch(p.toTypedArray())
         }
     }
 
     private fun refresh() {
+        atRoot = false
         val items = FileUtils.listFiles(currentDir, showHidden)
         adapter.update(items)
         binding.pathText.text = currentDir.absolutePath
         binding.emptyText.visibility = if (items.isEmpty()) View.VISIBLE else View.GONE
-        selection.clear()
+        binding.fabNewFolder.visibility = View.VISIBLE
+        sel.clear()
         supportActionBar?.title = "FreeFiles"
+        supportActionBar?.setDisplayHomeAsUpEnabled(true)
         invalidateOptionsMenu()
     }
 
     private fun handleClick(item: FileItem) {
-        if (selection.isNotEmpty()) { toggleSelection(item); return }
+        if (sel.isNotEmpty()) { toggleSel(item); return }
         if (item.isDir) {
             if (item.file.canRead()) { currentDir = item.file; refresh() }
-            else Toast.makeText(this, "Can't read folder", Toast.LENGTH_SHORT).show()
+            else Toast.makeText(this, "Can't read", Toast.LENGTH_SHORT).show()
+        } else if (ZipUtils.isZip(item.name)) {
+            AlertDialog.Builder(this).setTitle(item.name)
+                .setPositiveButton("Extract here") { _, _ -> extractZip(item.file) }
+                .setNeutralButton("Open as file") { _, _ -> openFile(item.file) }
+                .setNegativeButton("Cancel", null).show()
         } else openFile(item.file)
     }
 
-    private fun toggleSelection(item: FileItem) {
-        if (selection.contains(item)) selection.remove(item) else selection.add(item)
+    private fun toggleSel(item: FileItem) {
+        if (sel.contains(item)) sel.remove(item) else sel.add(item)
         adapter.notifyDataSetChanged()
-        supportActionBar?.title =
-            if (selection.isEmpty()) "FreeFiles" else "${selection.size} selected"
+        supportActionBar?.title = if (sel.isEmpty()) "FreeFiles" else "${sel.size} selected"
         invalidateOptionsMenu()
     }
 
-    /** THE FIX: use FileProvider, not Uri.fromFile() */
     private fun openFile(file: File) {
         try {
-            val uri: Uri = FileProvider.getUriForFile(
-                this,
-                "$packageName.fileprovider",
-                file
-            )
+            val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
             val mime = contentResolver.getType(uri) ?: guessMime(file.name)
-            val intent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(uri, mime)
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            startActivity(Intent.createChooser(intent, "Open with"))
+            startActivity(Intent.createChooser(
+                Intent(Intent.ACTION_VIEW).setDataAndType(uri, mime)
+                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), "Open with"))
         } catch (e: Exception) {
             Toast.makeText(this, "Can't open: ${e.message}", Toast.LENGTH_LONG).show()
         }
     }
 
     private fun guessMime(name: String): String {
-        val ext = name.substringAfterLast('.', "").lowercase()
-        return when (ext) {
+        val e = name.substringAfterLast('.', "").lowercase()
+        return when (e) {
             "jpg","jpeg","png","gif","webp","bmp","heic" -> "image/*"
             "mp4","mkv","avi","mov","webm","3gp" -> "video/*"
             "mp3","m4a","ogg","wav","flac","opus" -> "audio/*"
@@ -145,136 +168,139 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun goUp() {
-        if (selection.isNotEmpty()) { refresh(); return }
-        val parent = currentDir.parentFile
-        if (parent != null && parent.canRead()) { currentDir = parent; refresh() }
-        else Toast.makeText(this, "Already at top", Toast.LENGTH_SHORT).show()
+        if (sel.isNotEmpty()) { refresh(); return }
+        if (atRoot) return
+        val p = currentDir.parentFile
+        if (p != null && p.canRead() && p.absolutePath != "/storage") { currentDir = p; refresh() }
+        else showRoots()
     }
 
-    private fun promptNewFolder() {
+    private fun newFolder() {
         val input = EditText(this)
-        AlertDialog.Builder(this)
-            .setTitle("New folder").setView(input)
+        AlertDialog.Builder(this).setTitle("New folder").setView(input)
             .setPositiveButton("Create") { _, _ ->
-                val name = input.text.toString().trim()
-                if (name.isNotEmpty()) {
-                    if (File(currentDir, name).mkdir()) {
-                        Toast.makeText(this, "Created", Toast.LENGTH_SHORT).show()
-                        refresh()
-                    } else Toast.makeText(this, "Failed", Toast.LENGTH_SHORT).show()
-                }
-            }
-            .setNegativeButton("Cancel", null).show()
-    }
-
-    private fun promptRename(item: FileItem) {
-        val input = EditText(this).apply { setText(item.name) }
-        AlertDialog.Builder(this)
-            .setTitle("Rename").setView(input)
-            .setPositiveButton("Rename") { _, _ ->
-                val newName = input.text.toString().trim()
-                if (newName.isNotEmpty()) {
-                    if (item.file.renameTo(File(currentDir, newName))) refresh()
+                val n = input.text.toString().trim()
+                if (n.isNotEmpty()) {
+                    if (File(currentDir, n).mkdir()) { Toast.makeText(this, "Created", Toast.LENGTH_SHORT).show(); refresh() }
                     else Toast.makeText(this, "Failed", Toast.LENGTH_SHORT).show()
                 }
-            }
-            .setNegativeButton("Cancel", null).show()
+            }.setNegativeButton("Cancel", null).show()
     }
 
-    private fun confirmDelete() {
-        val items = selection.toList()
-        AlertDialog.Builder(this)
-            .setTitle("Delete ${items.size} item(s)?")
-            .setMessage("Cannot be undone.")
+    private fun rename(item: FileItem) {
+        val input = EditText(this).apply { setText(item.name) }
+        AlertDialog.Builder(this).setTitle("Rename").setView(input)
+            .setPositiveButton("Rename") { _, _ ->
+                val n = input.text.toString().trim()
+                if (n.isNotEmpty()) {
+                    if (item.file.renameTo(File(currentDir, n))) refresh()
+                    else Toast.makeText(this, "Failed", Toast.LENGTH_SHORT).show()
+                }
+            }.setNegativeButton("Cancel", null).show()
+    }
+
+    private fun delete() {
+        val items = sel.toList()
+        AlertDialog.Builder(this).setTitle("Delete ${items.size}?")
             .setPositiveButton("Delete") { _, _ ->
                 items.forEach { FileUtils.deleteRecursive(it.file) }
-                Toast.makeText(this, "Deleted", Toast.LENGTH_SHORT).show()
-                refresh()
-            }
-            .setNegativeButton("Cancel", null).show()
+                Toast.makeText(this, "Deleted", Toast.LENGTH_SHORT).show(); refresh()
+            }.setNegativeButton("Cancel", null).show()
     }
 
-    private fun copySelection(cut: Boolean) {
-        if (selection.size != 1) {
-            Toast.makeText(this, "Select one item", Toast.LENGTH_SHORT).show()
-            return
-        }
-        clipboard = selection.first().file to cut
+    private fun copy(cut: Boolean) {
+        if (sel.size != 1) { Toast.makeText(this, "Select one", Toast.LENGTH_SHORT).show(); return }
+        clip = sel.first().file to cut
         Toast.makeText(this, if (cut) "Cut" else "Copied", Toast.LENGTH_SHORT).show()
         refresh()
     }
 
-    private fun pasteHere() {
-        val (src, cut) = clipboard ?: return
+    private fun paste() {
+        val (src, cut) = clip ?: return
         val dst = File(currentDir, src.name)
-        if (dst.exists()) {
-            Toast.makeText(this, "Already exists", Toast.LENGTH_SHORT).show()
-            return
-        }
+        if (dst.exists()) { Toast.makeText(this, "Exists", Toast.LENGTH_SHORT).show(); return }
         val ok = if (cut) src.renameTo(dst) else FileUtils.copyRecursive(src, dst)
-        if (ok) {
-            Toast.makeText(this, "Done", Toast.LENGTH_SHORT).show()
-            clipboard = null
-            refresh()
-        } else Toast.makeText(this, "Failed", Toast.LENGTH_SHORT).show()
+        if (ok) { Toast.makeText(this, "Done", Toast.LENGTH_SHORT).show(); clip = null; refresh() }
+        else Toast.makeText(this, "Failed", Toast.LENGTH_SHORT).show()
     }
 
-    private fun showDetails(item: FileItem) {
+    private fun details(item: FileItem) {
         val f = item.file
-        val msg = "Name: ${f.name}\n" +
-                  "Path: ${f.absolutePath}\n" +
-                  "Type: ${if (f.isDirectory) "Folder" else "File"}\n" +
-                  "Size: ${if (f.isFile) FileUtils.formatSize(f.length()) else "-"}\n" +
-                  "Modified: ${FileUtils.formatDate(f.lastModified())}\n" +
-                  "Readable: ${f.canRead()}\n" +
-                  "Writable: ${f.canWrite()}"
-        AlertDialog.Builder(this).setTitle(f.name).setMessage(msg)
-            .setPositiveButton("OK", null).show()
+        val m = "Path: ${f.absolutePath}\nType: ${if (f.isDirectory) "Folder" else "File"}\n" +
+                "Size: ${if (f.isFile) FileUtils.formatSize(f.length()) else "-"}\n" +
+                "Modified: ${FileUtils.formatDate(f.lastModified())}\n" +
+                "Readable: ${f.canRead()}\nWritable: ${f.canWrite()}"
+        AlertDialog.Builder(this).setTitle(f.name).setMessage(m).setPositiveButton("OK", null).show()
+    }
+
+    private fun extractZip(z: File) {
+        val dst = File(currentDir, z.nameWithoutExtension)
+        if (dst.exists()) { Toast.makeText(this, "Exists", Toast.LENGTH_SHORT).show(); return }
+        val c = ZipUtils.extract(z, dst)
+        if (c >= 0) { Toast.makeText(this, "Extracted $c files", Toast.LENGTH_SHORT).show(); refresh() }
+        else Toast.makeText(this, "Failed", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun compress() {
+        if (sel.isEmpty()) return
+        val base = if (sel.size == 1) sel.first().file.nameWithoutExtension else "archive"
+        val dst = File(currentDir, "$base.zip")
+        if (dst.exists()) { Toast.makeText(this, "Exists", Toast.LENGTH_SHORT).show(); return }
+        if (ZipUtils.create(sel.map { it.file }, dst)) { Toast.makeText(this, "Created", Toast.LENGTH_SHORT).show(); refresh() }
+        else Toast.makeText(this, "Failed", Toast.LENGTH_SHORT).show()
     }
 
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
         menu.clear()
-        if (selection.isEmpty()) {
+        if (atRoot) { menu.add(0, 2, 0, "Refresh"); return true }
+        if (sel.isEmpty()) {
             menu.add(0, 1, 0, "New folder")
             menu.add(0, 2, 1, "Refresh")
             menu.add(0, 3, 2, if (showHidden) "Hide hidden" else "Show hidden")
-            if (clipboard != null) menu.add(0, 4, 3, "Paste here")
-        } else if (selection.size == 1) {
+            if (clip != null) menu.add(0, 4, 3, "Paste here")
+        } else if (sel.size == 1) {
+            val o = sel.first()
             menu.add(0, 10, 0, "Rename")
             menu.add(0, 11, 1, "Delete")
             menu.add(0, 12, 2, "Copy")
             menu.add(0, 13, 3, "Move")
             menu.add(0, 14, 4, "Details")
-            menu.add(0, 15, 5, "Deselect")
+            if (o.isDir || !ZipUtils.isZip(o.name)) menu.add(0, 17, 5, "Compress")
+            if (!o.isDir && ZipUtils.isZip(o.name)) menu.add(0, 16, 5, "Extract")
+            menu.add(0, 15, 6, "Deselect")
         } else {
-            menu.add(0, 11, 0, "Delete ${selection.size} items")
-            menu.add(0, 15, 1, "Deselect")
+            menu.add(0, 11, 0, "Delete ${sel.size}")
+            menu.add(0, 17, 1, "Compress ${sel.size}")
+            menu.add(0, 15, 2, "Deselect")
         }
         return true
     }
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
-        val first = selection.firstOrNull()
+        val f = sel.firstOrNull()
         return when (item.itemId) {
-            1 -> { promptNewFolder(); true }
-            2 -> { refresh(); true }
+            1 -> { newFolder(); true }
+            2 -> { if (atRoot) showRoots() else refresh(); true }
             3 -> { showHidden = !showHidden; refresh(); true }
-            4 -> { pasteHere(); true }
-            10 -> { if (first != null) promptRename(first); true }
-            11 -> { confirmDelete(); true }
-            12 -> { copySelection(false); true }
-            13 -> { copySelection(true); true }
-            14 -> { if (first != null) showDetails(first); true }
+            4 -> { paste(); true }
+            10 -> { if (f != null) rename(f); true }
+            11 -> { delete(); true }
+            12 -> { copy(false); true }
+            13 -> { copy(true); true }
+            14 -> { if (f != null) details(f); true }
             15 -> { refresh(); true }
+            16 -> { if (f != null) extractZip(f.file); true }
+            17 -> { compress(); true }
             else -> super.onOptionsItemSelected(item)
         }
     }
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
-        if (selection.isNotEmpty()) { refresh(); return }
-        val parent = currentDir.parentFile
-        if (parent != null && parent.canRead()) { currentDir = parent; refresh() }
-        else @Suppress("DEPRECATION") super.onBackPressed()
+        if (sel.isNotEmpty()) { refresh(); return }
+        if (atRoot) { @Suppress("DEPRECATION") super.onBackPressed(); return }
+        val p = currentDir.parentFile
+        if (p != null && p.canRead() && p.absolutePath != "/storage") { currentDir = p; refresh() }
+        else showRoots()
     }
 }
