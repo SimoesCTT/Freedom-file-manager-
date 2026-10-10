@@ -11,6 +11,11 @@ val keystoreProps = Properties().apply {
 }
 
 android {
+    dependenciesInfo {
+        includeInApk = false
+        includeInBundle = false
+    }
+
     namespace = "com.free.files"
     compileSdk = 34
 

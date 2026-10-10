@@ -3,6 +3,7 @@ A free, ad-free, tracker-free file manager for Android.
 No ads. No analytics. No network permission. No limitations.
 
 Features:
+
 * Browse internal and external storage
 * Tap folders to enter, Back to go up
 * Open files with any installed app
